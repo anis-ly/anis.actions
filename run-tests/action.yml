@@ -1,0 +1,150 @@
+name: 'Run Integration Tests'
+description: 'Runs integration tests with TestContainers and displays detailed logs'
+
+inputs:
+  dotnet-version:
+    description: 'The .NET version to use'
+    required: true
+    default: '9.0.x'
+  test-project-path:
+    description: 'Path to the test project'
+    required: true
+  configuration:
+    description: 'Build configuration'
+    required: false
+    default: 'Release'
+  collect-coverage:
+    description: 'Whether to collect code coverage'
+    required: false
+    default: 'true'
+
+runs:
+  using: 'composite'
+  steps:
+    # =============================================================================
+    # SETUP PHASE - Prepare the environment
+    # =============================================================================
+    - name: 🔧 Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: 📦 Restore dependencies
+      shell: bash
+      run: dotnet restore
+
+    - name: 🏗️ Build solution
+      shell: bash
+      run: dotnet build --no-restore --configuration ${{ inputs.configuration }}
+
+    # =============================================================================
+    # DOCKER PHASE - Prepare containerized testing environment
+    # =============================================================================
+    - name: 🐳 Start Docker daemon (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Starting Docker daemon..."
+        sudo systemctl start docker
+        
+        echo "Waiting for Docker to be ready..."
+        timeout 30 bash -c 'until docker info > /dev/null 2>&1; do sleep 1; done'
+        
+        echo "✅ Docker is ready!"
+
+    - name: 📊 Check Docker status
+      shell: bash
+      run: |
+        echo "=== Docker Version ==="
+        docker --version
+        echo
+        echo "=== Docker System Info ==="
+        docker info
+
+    # =============================================================================
+    # TESTING PHASE - Run integration tests with TestContainers
+    # =============================================================================
+    - name: 🧪 Run integration tests (with coverage)
+      if: inputs.collect-coverage == 'true'
+      shell: bash
+      continue-on-error: true
+      id: test-with-coverage
+      run: |
+        echo "🚀 Running integration tests with code coverage..."
+        echo "📁 Test Project: ${{ inputs.test-project-path }}"
+        echo "⚙️  Configuration: ${{ inputs.configuration }}"
+        echo
+        
+        dotnet test ${{ inputs.test-project-path }} \
+          --no-build \
+          --configuration ${{ inputs.configuration }} \
+          --logger "console;verbosity=detailed" \
+          --logger "trx;LogFileName=TestResults.trx" \
+          --collect:"XPlat Code Coverage" \
+          --results-directory ./TestResults \
+          -- RunConfiguration.CollectSourceInformation=true
+
+    - name: 🧪 Run integration tests (without coverage)
+      if: inputs.collect-coverage != 'true'
+      shell: bash
+      continue-on-error: true
+      id: test-without-coverage
+      run: |
+        echo "🚀 Running integration tests without code coverage..."
+        echo "📁 Test Project: ${{ inputs.test-project-path }}"
+        echo "⚙️  Configuration: ${{ inputs.configuration }}"
+        echo
+        
+        dotnet test ${{ inputs.test-project-path }} \
+          --no-build \
+          --configuration ${{ inputs.configuration }} \
+          --logger "console;verbosity=detailed" \
+          --logger "trx;LogFileName=TestResults.trx" \
+          --results-directory ./TestResults
+
+    # =============================================================================
+    # VALIDATION PHASE - Check test results and determine success/failure
+    # =============================================================================
+    - name: ✅ Evaluate test results
+      shell: bash
+      run: |
+        echo "🔍 Checking test execution outcomes..."
+        
+        # Check outcomes from both possible test steps
+        WITH_COVERAGE_OUTCOME="${{ steps.test-with-coverage.outcome }}"
+        WITHOUT_COVERAGE_OUTCOME="${{ steps.test-without-coverage.outcome }}"
+        
+        echo "📊 Test with coverage outcome: $WITH_COVERAGE_OUTCOME"
+        echo "📊 Test without coverage outcome: $WITHOUT_COVERAGE_OUTCOME"
+        echo
+        
+        if [ "$WITH_COVERAGE_OUTCOME" = "failure" ] || [ "$WITHOUT_COVERAGE_OUTCOME" = "failure" ]; then
+          echo "❌ Tests failed! Check the test results for details."
+          echo "📥 Test results will be available in artifacts for download."
+          exit 1
+        else
+          echo "✅ All tests passed successfully!"
+          echo "🎉 Integration tests completed without errors."
+        fi
+
+    # =============================================================================
+    # ARTIFACTS PHASE - Upload test results and coverage data
+    # =============================================================================
+    - name: 📦 Upload test results and coverage
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-results-${{ github.run_number }}
+        path: |
+          TestResults/*.trx
+          TestResults/**/coverage.cobertura.xml
+        retention-days: 30
+
+    - name: 📈 Upload coverage to Codecov
+      if: inputs.collect-coverage == 'true'
+      uses: codecov/codecov-action@v4
+      with:
+        directory: ./TestResults
+        flags: integration-tests
+        name: integration-tests
+        fail_ci_if_error: false

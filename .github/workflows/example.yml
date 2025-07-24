@@ -1,0 +1,47 @@
+name: Example Integration Tests
+
+on:
+  release:
+    types: [ "published" ]
+  workflow_dispatch:
+jobs:
+  test:
+    name: Run Integration Tests
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        dotnet-version: ['8.0.x', '9.0.x']
+        include:
+          - dotnet-version: '8.0.x'
+            configuration: 'Debug'
+          - dotnet-version: '9.0.x'
+            configuration: 'Release'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🧪 Run integration tests
+      uses: ./run-tests
+      with:
+        dotnet-version: ${{ matrix.dotnet-version }}
+        test-project-path: './tests/Example.IntegrationTests'
+        configuration: ${{ matrix.configuration }}
+        collect-coverage: ${{ matrix.configuration == 'Release' }}
+
+  test-without-coverage:
+    name: Run Tests (No Coverage)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🧪 Run tests without coverage
+      uses: ./run-tests
+      with:
+        dotnet-version: '9.0.x'
+        test-project-path: './tests/Example.IntegrationTests'
+        configuration: 'Debug'
+        collect-coverage: 'false'
