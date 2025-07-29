@@ -134,7 +134,7 @@ runs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: test-results-${{ inputs.test-project-path }}-${{ github.run_number }}
+        name: test-results-${{ replace(inputs.test-project-path, '/', '-') }}-${{ github.run_number }}
         path: |
           TestResults/*.trx
           TestResults/**/coverage.cobertura.xml
