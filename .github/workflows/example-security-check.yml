@@ -1,0 +1,58 @@
+name: Example Security Check
+
+on:
+  release:
+    types: [ "published" ]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Docker image to scan'
+        required: false
+        default: 'nginx:latest'
+
+jobs:
+  security-scan-public-image:
+    name: Scan Public Docker Image
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🔒 Security scan - nginx
+      uses: ./security-check
+      with:
+        image: 'nginx:latest'
+        severity: 'CRITICAL,HIGH'
+
+  security-scan-with-custom-settings:
+    name: Scan with Custom Settings
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🔒 Security scan - alpine (strict)
+      uses: ./security-check
+      with:
+        image: 'alpine:latest'
+        severity: 'CRITICAL,HIGH,MEDIUM'
+        ignore-unfixed: 'true'
+        timeout: '10m'
+
+  security-scan-user-input:
+    name: Scan User-Provided Image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - name: 📥 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🔒 Security scan - custom image
+      uses: ./security-check
+      with:
+        image: ${{ github.event.inputs.image }}
+        severity: 'CRITICAL,HIGH'
+        ignore-unfixed: 'false'

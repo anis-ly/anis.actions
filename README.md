@@ -1,8 +1,99 @@
 # Anis Actions 🚀
 
-A collection of reusable GitHub Actions for .NET projects, designed to streamline CI/CD workflows with TestContainers integration.
+A collection of reusable GitHub Actions for .NET projects, designed to streamline CI/CD workflows with TestContainers integration and security scanning.
 
 ## Available Actions
+
+### 🔒 Security Check (`security-check`)
+
+A comprehensive action for scanning Docker images for security vulnerabilities using Trivy. Automatically fails workflows on critical/high severity vulnerabilities and creates annotations for warnings.
+
+#### Features
+
+- 🔍 **Vulnerability Scanning** - Deep security analysis using Aqua Security's Trivy
+- 🎯 **Configurable Severity** - Set custom thresholds for failing builds
+- 📊 **Detailed Reporting** - Comprehensive vulnerability summaries with severity breakdowns
+- 🚨 **GitHub Annotations** - Automatic annotations for all detected vulnerabilities
+- 📦 **Artifact Upload** - Scan results saved as artifacts for detailed analysis
+- ⚙️ **Flexible Configuration** - Ignore unfixed vulnerabilities, set timeouts, and more
+
+#### Usage
+
+```yaml
+name: Security Scan
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Security scan
+      uses: your-username/anis.actions/security-check@v1
+      with:
+        image: 'myorg/myapp:latest'
+        severity: 'CRITICAL,HIGH'
+```
+
+#### Inputs
+
+| Input | Description | Required | Default |
+|-------|-------------|----------|---------|
+| `image` | Docker image to scan (e.g., nginx:latest) | ✅ Yes | - |
+| `severity` | Comma-separated severities to fail on | ❌ No | `CRITICAL,HIGH` |
+| `format` | Output format (table, json, sarif) | ❌ No | `table` |
+| `trivy-version` | Version of Trivy to use | ❌ No | `latest` |
+| `ignore-unfixed` | Ignore vulnerabilities without fixes | ❌ No | `false` |
+| `timeout` | Timeout for scan (e.g., 5m, 10m) | ❌ No | `5m` |
+
+#### Outputs
+
+| Output | Description |
+|--------|-------------|
+| `scan-result` | Result of the security scan (passed/failed) |
+| `vulnerabilities-found` | Number of vulnerabilities found |
+
+#### Behavior
+
+- **CRITICAL/HIGH Vulnerabilities**: Workflow fails (configurable via `severity` input)
+- **MEDIUM Vulnerabilities**: GitHub warning annotations
+- **LOW/UNKNOWN Vulnerabilities**: GitHub notice annotations
+- **Summary**: Detailed vulnerability breakdown in job summary
+- **Artifacts**: JSON and text reports uploaded for analysis
+
+#### Example with Multiple Images
+
+```yaml
+jobs:
+  security-check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: 
+          - 'nginx:latest'
+          - 'alpine:latest'
+          - 'postgres:15'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Scan ${{ matrix.image }}
+      uses: your-username/anis.actions/security-check@v1
+      with:
+        image: ${{ matrix.image }}
+        severity: 'CRITICAL,HIGH'
+        ignore-unfixed: 'true'
+```
+
+---
 
 ### 🧪 Run Tests (`run-tests`)
 
