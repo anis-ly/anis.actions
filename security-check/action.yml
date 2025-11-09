@@ -31,8 +31,14 @@ outputs:
     description: 'Result of the security scan (passed/failed)'
     value: ${{ steps.scan.outputs.result }}
   vulnerabilities-found:
-    description: 'Number of vulnerabilities found'
+    description: 'Total number of vulnerabilities found'
     value: ${{ steps.scan.outputs.vuln_count }}
+  fixed-vulnerabilities:
+    description: 'Number of vulnerabilities with fixes available'
+    value: ${{ steps.scan.outputs.fixed_vuln_count }}
+  unfixed-vulnerabilities:
+    description: 'Number of vulnerabilities without fixes'
+    value: ${{ steps.scan.outputs.unfixed_vuln_count }}
 
 runs:
   using: 'composite'
@@ -80,6 +86,7 @@ runs:
         echo "🚀 Starting security scan for image: ${{ inputs.image }}"
         echo "⚙️  Severity threshold: ${{ inputs.severity }}"
         echo "⏱️  Timeout: ${{ inputs.timeout }}"
+        echo "🔧 Ignore unfixed: ${{ inputs.ignore-unfixed }}"
         echo
         
         # Create output directory
@@ -93,42 +100,73 @@ runs:
         set +e
         
         # Run Trivy scan with JSON output for parsing
+        # Note: We always scan without --ignore-unfixed first to get all vulnerabilities
         echo "📝 Running Trivy scan..."
         trivy image \
-          --exit-code 1 \
+          --exit-code 0 \
           --severity "${{ inputs.severity }}" \
           --format json \
           --output trivy-results/scan-results.json \
           --timeout "${{ inputs.timeout }}" \
-          ${{ inputs.ignore-unfixed == 'true' && '--ignore-unfixed' || '' }} \
           "${{ inputs.image }}"
         
-        SCAN_EXIT_CODE=$?
+        TRIVY_EXIT=$?
         
-        # Also generate human-readable table output (ignore exit code for display)
+        # Also generate human-readable table output for display
         trivy image \
-          --exit-code 1 \
+          --exit-code 0 \
           --severity "${{ inputs.severity }}" \
           --format table \
           --timeout "${{ inputs.timeout }}" \
-          ${{ inputs.ignore-unfixed == 'true' && '--ignore-unfixed' || '' }} \
           "${{ inputs.image }}" | tee trivy-results/scan-table.txt
         
         # Re-enable exit on error
         set -e
         
-        # Parse results
+        # Parse results and separate fixed vs unfixed vulnerabilities
         if [ -f trivy-results/scan-results.json ]; then
-          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-results/scan-results.json)
-          echo "vuln_count=$VULN_COUNT" >> $GITHUB_OUTPUT
+          # Count total vulnerabilities
+          TOTAL_VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-results/scan-results.json)
           
-          if [ "$VULN_COUNT" -gt 0 ]; then
-            echo "⚠️  Found $VULN_COUNT vulnerabilities"
+          # Count vulnerabilities with fixes (FixedVersion is not empty/null)
+          FIXED_VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          
+          # Count unfixed vulnerabilities
+          UNFIXED_VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.FixedVersion == null or .FixedVersion == "")] | length' trivy-results/scan-results.json)
+          
+          echo "vuln_count=$TOTAL_VULN_COUNT" >> $GITHUB_OUTPUT
+          echo "fixed_vuln_count=$FIXED_VULN_COUNT" >> $GITHUB_OUTPUT
+          echo "unfixed_vuln_count=$UNFIXED_VULN_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$TOTAL_VULN_COUNT" -gt 0 ]; then
+            echo "⚠️  Found $TOTAL_VULN_COUNT total vulnerabilities"
+            echo "   - $FIXED_VULN_COUNT with fixes available"
+            echo "   - $UNFIXED_VULN_COUNT without fixes"
           else
             echo "✅ No vulnerabilities found!"
           fi
         else
           echo "vuln_count=0" >> $GITHUB_OUTPUT
+          echo "fixed_vuln_count=0" >> $GITHUB_OUTPUT
+          echo "unfixed_vuln_count=0" >> $GITHUB_OUTPUT
+        fi
+        
+        # Determine exit code based on ignore-unfixed setting
+        SCAN_EXIT_CODE=0
+        if [ "${{ inputs.ignore-unfixed }}" = "true" ]; then
+          # When ignore-unfixed is true, only fail on vulnerabilities with fixes
+          if [ "$FIXED_VULN_COUNT" -gt 0 ]; then
+            echo "❌ Found $FIXED_VULN_COUNT vulnerabilities with fixes available"
+            SCAN_EXIT_CODE=1
+          else
+            echo "✅ No fixable vulnerabilities found (unfixed vulnerabilities are ignored)"
+          fi
+        else
+          # When ignore-unfixed is false, fail on any vulnerability
+          if [ "$TOTAL_VULN_COUNT" -gt 0 ]; then
+            echo "❌ Found $TOTAL_VULN_COUNT vulnerabilities"
+            SCAN_EXIT_CODE=1
+          fi
         fi
         
         # Set result based on exit code
@@ -149,14 +187,17 @@ runs:
       run: |
         echo "📝 Creating GitHub annotations for vulnerabilities..."
         
-        # Parse JSON and create annotations
+        # Parse JSON and create annotations with fix status
         jq -r '.Results[]? | select(.Vulnerabilities != null) | .Vulnerabilities[] | 
+          # Determine fix status
+          (if (.FixedVersion != null and .FixedVersion != "") then " [Fix: " + .FixedVersion + "]" else " [UNFIXED]" end) as $fixStatus |
+          # Create annotation based on severity
           if .Severity == "CRITICAL" or .Severity == "HIGH" then
-            "::error title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+            "::error title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + $fixStatus + " - " + (.Title // .Description // "No description")
           elif .Severity == "MEDIUM" then
-            "::warning title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+            "::warning title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + $fixStatus + " - " + (.Title // .Description // "No description")
           else
-            "::notice title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+            "::notice title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + $fixStatus + " - " + (.Title // .Description // "No description")
           end' trivy-results/scan-results.json || echo "No vulnerabilities to annotate"
 
     # =============================================================================
@@ -172,53 +213,99 @@ runs:
           echo "# 🔒 Security Scan Results"
           echo
           echo "**Image:** \`${{ inputs.image }}\`"
+          echo "**Ignore Unfixed:** \`${{ inputs.ignore-unfixed }}\`"
           echo
           echo "## Vulnerability Summary"
           echo
           
-          # Count vulnerabilities by severity
+          # Count vulnerabilities by severity (all vulnerabilities)
           CRITICAL=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "CRITICAL")] | length' trivy-results/scan-results.json)
           HIGH=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "HIGH")] | length' trivy-results/scan-results.json)
           MEDIUM=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "MEDIUM")] | length' trivy-results/scan-results.json)
           LOW=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "LOW")] | length' trivy-results/scan-results.json)
           UNKNOWN=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "UNKNOWN")] | length' trivy-results/scan-results.json)
           
-          echo "| Severity | Count |"
-          echo "|----------|-------|"
-          echo "| 🔴 Critical | $CRITICAL |"
-          echo "| 🟠 High | $HIGH |"
-          echo "| 🟡 Medium | $MEDIUM |"
-          echo "| 🟢 Low | $LOW |"
-          echo "| ⚪ Unknown | $UNKNOWN |"
+          # Count fixed vulnerabilities by severity
+          CRITICAL_FIXED=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "CRITICAL" and .FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          HIGH_FIXED=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "HIGH" and .FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          MEDIUM_FIXED=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "MEDIUM" and .FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          LOW_FIXED=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "LOW" and .FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          UNKNOWN_FIXED=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "UNKNOWN" and .FixedVersion != null and .FixedVersion != "")] | length' trivy-results/scan-results.json)
+          
+          # Count unfixed vulnerabilities by severity
+          CRITICAL_UNFIXED=$((CRITICAL - CRITICAL_FIXED))
+          HIGH_UNFIXED=$((HIGH - HIGH_FIXED))
+          MEDIUM_UNFIXED=$((MEDIUM - MEDIUM_FIXED))
+          LOW_UNFIXED=$((LOW - LOW_FIXED))
+          UNKNOWN_UNFIXED=$((UNKNOWN - UNKNOWN_FIXED))
+          
+          echo "| Severity | Total | Fixable | Unfixed |"
+          echo "|----------|-------|---------|---------|"
+          echo "| 🔴 Critical | $CRITICAL | $CRITICAL_FIXED | $CRITICAL_UNFIXED |"
+          echo "| 🟠 High | $HIGH | $HIGH_FIXED | $HIGH_UNFIXED |"
+          echo "| 🟡 Medium | $MEDIUM | $MEDIUM_FIXED | $MEDIUM_UNFIXED |"
+          echo "| 🟢 Low | $LOW | $LOW_FIXED | $LOW_UNFIXED |"
+          echo "| ⚪ Unknown | $UNKNOWN | $UNKNOWN_FIXED | $UNKNOWN_UNFIXED |"
           echo
           
-          # Determine scan status
+          # Determine scan status based on ignore-unfixed setting
           FAIL_SEVERITIES="${{ inputs.severity }}"
           SHOULD_FAIL=false
           
-          if [[ "$FAIL_SEVERITIES" == *"CRITICAL"* ]] && [ "$CRITICAL" -gt 0 ]; then
-            SHOULD_FAIL=true
-          fi
-          if [[ "$FAIL_SEVERITIES" == *"HIGH"* ]] && [ "$HIGH" -gt 0 ]; then
-            SHOULD_FAIL=true
-          fi
-          if [[ "$FAIL_SEVERITIES" == *"MEDIUM"* ]] && [ "$MEDIUM" -gt 0 ]; then
-            SHOULD_FAIL=true
-          fi
-          if [[ "$FAIL_SEVERITIES" == *"LOW"* ]] && [ "$LOW" -gt 0 ]; then
-            SHOULD_FAIL=true
+          if [ "${{ inputs.ignore-unfixed }}" = "true" ]; then
+            # When ignore-unfixed is true, only fail on fixable vulnerabilities
+            if [[ "$FAIL_SEVERITIES" == *"CRITICAL"* ]] && [ "$CRITICAL_FIXED" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"HIGH"* ]] && [ "$HIGH_FIXED" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"MEDIUM"* ]] && [ "$MEDIUM_FIXED" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"LOW"* ]] && [ "$LOW_FIXED" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+          else
+            # When ignore-unfixed is false, fail on any vulnerability
+            if [[ "$FAIL_SEVERITIES" == *"CRITICAL"* ]] && [ "$CRITICAL" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"HIGH"* ]] && [ "$HIGH" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"MEDIUM"* ]] && [ "$MEDIUM" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
+            if [[ "$FAIL_SEVERITIES" == *"LOW"* ]] && [ "$LOW" -gt 0 ]; then
+              SHOULD_FAIL=true
+            fi
           fi
           
           if [ "$SHOULD_FAIL" = true ]; then
             echo "## ❌ Scan Result: FAILED"
             echo
-            echo "**Critical or high severity vulnerabilities detected!**"
+            if [ "${{ inputs.ignore-unfixed }}" = "true" ]; then
+              echo "**Fixable vulnerabilities detected!**"
+              echo
+              echo "Unfixed vulnerabilities are shown but ignored in the failure check."
+            else
+              echo "**Critical or high severity vulnerabilities detected!**"
+            fi
             echo
             echo "Failing severities: \`${{ inputs.severity }}\`"
           else
             echo "## ✅ Scan Result: PASSED"
             echo
-            echo "No critical or high severity vulnerabilities found."
+            if [ "${{ inputs.ignore-unfixed }}" = "true" ]; then
+              echo "No fixable vulnerabilities found matching the severity threshold."
+              if [ "$((CRITICAL_UNFIXED + HIGH_UNFIXED + MEDIUM_UNFIXED + LOW_UNFIXED + UNKNOWN_UNFIXED))" -gt 0 ]; then
+                echo
+                echo "⚠️ **Note:** Unfixed vulnerabilities were found but are being ignored."
+              fi
+            else
+              echo "No vulnerabilities found matching the severity threshold."
+            fi
           fi
           
           echo
