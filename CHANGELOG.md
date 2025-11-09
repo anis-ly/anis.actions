@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **security-check action**: Comprehensive Docker image vulnerability scanning with Trivy
+  - Configurable severity thresholds (CRITICAL, HIGH, MEDIUM, LOW, UNKNOWN)
+  - Automatic GitHub annotations for all vulnerabilities
+  - Detailed job summaries with vulnerability breakdowns
+  - Artifact upload for scan results
+  - Support for ignoring unfixed vulnerabilities
+  - Configurable scan timeouts
 - Initial release of `run-tests` action
 - Support for .NET integration tests with TestContainers
 - Code coverage collection with XPlat Code Coverage

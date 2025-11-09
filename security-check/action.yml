@@ -1,0 +1,249 @@
+name: 'Security Check'
+description: 'Scans container images for security vulnerabilities and fails on critical/high severity issues'
+
+inputs:
+  image:
+    description: 'Docker image to scan (e.g., nginx:latest or myorg/myimage:v1.0.0)'
+    required: true
+  severity:
+    description: 'Comma-separated list of severities to fail on (CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN)'
+    required: false
+    default: 'CRITICAL,HIGH'
+  format:
+    description: 'Output format for Trivy scan results (table, json, sarif, template)'
+    required: false
+    default: 'table'
+  trivy-version:
+    description: 'Version of Trivy to use'
+    required: false
+    default: 'latest'
+  ignore-unfixed:
+    description: 'Ignore vulnerabilities without fixes'
+    required: false
+    default: 'false'
+  timeout:
+    description: 'Timeout for Trivy scan (e.g., 5m, 10m)'
+    required: false
+    default: '5m'
+
+outputs:
+  scan-result:
+    description: 'Result of the security scan (passed/failed)'
+    value: ${{ steps.scan.outputs.result }}
+  vulnerabilities-found:
+    description: 'Number of vulnerabilities found'
+    value: ${{ steps.scan.outputs.vuln_count }}
+
+runs:
+  using: 'composite'
+  steps:
+    # =============================================================================
+    # SETUP PHASE - Install Trivy scanner
+    # =============================================================================
+    - name: 🔧 Install Trivy
+      shell: bash
+      run: |
+        echo "📦 Installing Trivy security scanner..."
+        
+        # Install Trivy based on OS
+        if [ "$RUNNER_OS" == "Linux" ]; then
+          sudo apt-get update
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update
+          sudo apt-get install -y trivy
+        elif [ "$RUNNER_OS" == "macOS" ]; then
+          brew install aquasecurity/trivy/trivy
+        elif [ "$RUNNER_OS" == "Windows" ]; then
+          choco install trivy
+        fi
+        
+        echo "✅ Trivy installed successfully!"
+        trivy --version
+
+    - name: 📊 Update Trivy vulnerability database
+      shell: bash
+      run: |
+        echo "🔄 Updating Trivy vulnerability database..."
+        trivy image --download-db-only
+        echo "✅ Database updated successfully!"
+
+    # =============================================================================
+    # SCANNING PHASE - Scan the image for vulnerabilities
+    # =============================================================================
+    - name: 🔍 Scan image for vulnerabilities
+      shell: bash
+      id: scan
+      continue-on-error: true
+      run: |
+        echo "🚀 Starting security scan for image: ${{ inputs.image }}"
+        echo "⚙️  Severity threshold: ${{ inputs.severity }}"
+        echo "⏱️  Timeout: ${{ inputs.timeout }}"
+        echo
+        
+        # Create output directory
+        mkdir -p trivy-results
+        
+        # Run Trivy scan with JSON output for parsing
+        echo "📝 Running Trivy scan..."
+        trivy image \
+          --severity "${{ inputs.severity }}" \
+          --format json \
+          --output trivy-results/scan-results.json \
+          --timeout "${{ inputs.timeout }}" \
+          ${{ inputs.ignore-unfixed == 'true' && '--ignore-unfixed' || '' }} \
+          "${{ inputs.image }}"
+        
+        SCAN_EXIT_CODE=$?
+        
+        # Also generate human-readable table output
+        trivy image \
+          --severity "${{ inputs.severity }}" \
+          --format table \
+          --timeout "${{ inputs.timeout }}" \
+          ${{ inputs.ignore-unfixed == 'true' && '--ignore-unfixed' || '' }} \
+          "${{ inputs.image }}" | tee trivy-results/scan-table.txt
+        
+        # Parse results
+        if [ -f trivy-results/scan-results.json ]; then
+          VULN_COUNT=$(jq '[.Results[]?.Vulnerabilities // [] | length] | add // 0' trivy-results/scan-results.json)
+          echo "vuln_count=$VULN_COUNT" >> $GITHUB_OUTPUT
+          
+          if [ "$VULN_COUNT" -gt 0 ]; then
+            echo "⚠️  Found $VULN_COUNT vulnerabilities"
+          else
+            echo "✅ No vulnerabilities found!"
+          fi
+        else
+          echo "vuln_count=0" >> $GITHUB_OUTPUT
+        fi
+        
+        # Set result based on exit code
+        if [ $SCAN_EXIT_CODE -eq 0 ]; then
+          echo "result=passed" >> $GITHUB_OUTPUT
+        else
+          echo "result=failed" >> $GITHUB_OUTPUT
+        fi
+        
+        exit $SCAN_EXIT_CODE
+
+    # =============================================================================
+    # ANNOTATION PHASE - Create GitHub annotations for findings
+    # =============================================================================
+    - name: 📋 Generate annotations for vulnerabilities
+      shell: bash
+      if: always() && hashFiles('trivy-results/scan-results.json') != ''
+      run: |
+        echo "📝 Creating GitHub annotations for vulnerabilities..."
+        
+        # Parse JSON and create annotations
+        jq -r '.Results[]? | select(.Vulnerabilities != null) | .Vulnerabilities[] | 
+          if .Severity == "CRITICAL" or .Severity == "HIGH" then
+            "::error title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+          elif .Severity == "MEDIUM" then
+            "::warning title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+          else
+            "::notice title=" + .Severity + " - " + .VulnerabilityID + "::" + .PkgName + " " + (.InstalledVersion // "unknown") + " - " + (.Title // .Description // "No description")
+          end' trivy-results/scan-results.json || echo "No vulnerabilities to annotate"
+
+    # =============================================================================
+    # SUMMARY PHASE - Create job summary
+    # =============================================================================
+    - name: 📊 Create security scan summary
+      shell: bash
+      if: always() && hashFiles('trivy-results/scan-results.json') != ''
+      run: |
+        echo "📄 Creating job summary..."
+        
+        {
+          echo "# 🔒 Security Scan Results"
+          echo
+          echo "**Image:** \`${{ inputs.image }}\`"
+          echo
+          echo "## Vulnerability Summary"
+          echo
+          
+          # Count vulnerabilities by severity
+          CRITICAL=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "CRITICAL")] | length' trivy-results/scan-results.json)
+          HIGH=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "HIGH")] | length' trivy-results/scan-results.json)
+          MEDIUM=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "MEDIUM")] | length' trivy-results/scan-results.json)
+          LOW=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "LOW")] | length' trivy-results/scan-results.json)
+          UNKNOWN=$(jq '[.Results[]?.Vulnerabilities // [] | .[] | select(.Severity == "UNKNOWN")] | length' trivy-results/scan-results.json)
+          
+          echo "| Severity | Count |"
+          echo "|----------|-------|"
+          echo "| 🔴 Critical | $CRITICAL |"
+          echo "| 🟠 High | $HIGH |"
+          echo "| 🟡 Medium | $MEDIUM |"
+          echo "| 🟢 Low | $LOW |"
+          echo "| ⚪ Unknown | $UNKNOWN |"
+          echo
+          
+          # Determine scan status
+          FAIL_SEVERITIES="${{ inputs.severity }}"
+          SHOULD_FAIL=false
+          
+          if [[ "$FAIL_SEVERITIES" == *"CRITICAL"* ]] && [ "$CRITICAL" -gt 0 ]; then
+            SHOULD_FAIL=true
+          fi
+          if [[ "$FAIL_SEVERITIES" == *"HIGH"* ]] && [ "$HIGH" -gt 0 ]; then
+            SHOULD_FAIL=true
+          fi
+          if [[ "$FAIL_SEVERITIES" == *"MEDIUM"* ]] && [ "$MEDIUM" -gt 0 ]; then
+            SHOULD_FAIL=true
+          fi
+          if [[ "$FAIL_SEVERITIES" == *"LOW"* ]] && [ "$LOW" -gt 0 ]; then
+            SHOULD_FAIL=true
+          fi
+          
+          if [ "$SHOULD_FAIL" = true ]; then
+            echo "## ❌ Scan Result: FAILED"
+            echo
+            echo "**Critical or high severity vulnerabilities detected!**"
+            echo
+            echo "Failing severities: \`${{ inputs.severity }}\`"
+          else
+            echo "## ✅ Scan Result: PASSED"
+            echo
+            echo "No critical or high severity vulnerabilities found."
+          fi
+          
+          echo
+          echo "## 📋 Detailed Results"
+          echo
+          echo '```'
+          cat trivy-results/scan-table.txt
+          echo '```'
+          
+        } >> $GITHUB_STEP_SUMMARY
+
+    # =============================================================================
+    # ARTIFACTS PHASE - Upload scan results
+    # =============================================================================
+    - name: 📦 Upload scan results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-scan-results-${{ github.run_number }}
+        path: |
+          trivy-results/*.json
+          trivy-results/*.txt
+        retention-days: 30
+
+    # =============================================================================
+    # VALIDATION PHASE - Fail if critical/high vulnerabilities found
+    # =============================================================================
+    - name: ✅ Evaluate scan results
+      shell: bash
+      run: |
+        SCAN_RESULT="${{ steps.scan.outputs.result }}"
+        
+        if [ "$SCAN_RESULT" = "failed" ]; then
+          echo "❌ Security scan failed! Critical or high severity vulnerabilities detected."
+          echo "📥 Scan results are available in artifacts for detailed analysis."
+          exit 1
+        else
+          echo "✅ Security scan passed! No critical or high severity vulnerabilities found."
+          echo "🎉 Image is safe to use."
+        fi
