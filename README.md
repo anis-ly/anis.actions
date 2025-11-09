@@ -59,27 +59,40 @@ jobs:
 | Output | Description |
 |--------|-------------|
 | `scan-result` | Result of the security scan (passed/failed) |
-| `vulnerabilities-found` | Number of vulnerabilities found |
+| `vulnerabilities-found` | Total number of vulnerabilities found |
+| `fixed-vulnerabilities` | Number of vulnerabilities with fixes available |
+| `unfixed-vulnerabilities` | Number of vulnerabilities without fixes |
 
 #### Behavior
 
 - **Workflow Failure**: The action will **fail the workflow** when vulnerabilities matching the configured severity levels are found
   - Default severities: `CRITICAL,HIGH` (configurable via `severity` input)
-  - Uses Trivy's `--exit-code 1` flag to detect vulnerabilities
-  - The workflow will stop and prevent deployment if vulnerabilities are detected
+  - When `ignore-unfixed: 'false'` (default): Fails on ANY vulnerability matching the severity threshold
+  - When `ignore-unfixed: 'true'`: Only fails on vulnerabilities with fixes available, but **still shows all vulnerabilities** (including unfixed ones) in the output
+  - The workflow will stop and prevent deployment if fixable vulnerabilities are detected
 - **GitHub Annotations**:
   - **CRITICAL/HIGH**: Error annotations (red) 
   - **MEDIUM**: Warning annotations (yellow)
   - **LOW/UNKNOWN**: Notice annotations (blue)
-- **Job Summary**: Detailed vulnerability breakdown with severity counts and full scan results
+  - Annotations include fix status: `[Fix: version]` for fixable vulnerabilities or `[UNFIXED]` for vulnerabilities without fixes
+- **Job Summary**: Detailed vulnerability breakdown with:
+  - Severity counts (Total, Fixable, Unfixed)
+  - Clear indication of which vulnerabilities can be fixed
+  - Full scan results with all vulnerabilities displayed
 - **Artifacts**: JSON and text reports uploaded for detailed offline analysis (retained for 30 days)
 
 #### Important Notes
 
-⚠️ **The workflow WILL fail** if vulnerabilities matching your severity threshold are found. This is by design to prevent insecure deployments.
+⚠️ **The workflow WILL fail** if vulnerabilities matching your severity threshold are found (unless they are unfixed and `ignore-unfixed: 'true'`). This is by design to prevent insecure deployments.
+
+**Understanding `ignore-unfixed` behavior:**
+- When `ignore-unfixed: 'true'`: Unfixed vulnerabilities are **shown in all outputs** (annotations, summary, artifacts) but do NOT cause the workflow to fail
+- When `ignore-unfixed: 'false'` (default): All vulnerabilities cause workflow failure, regardless of fix availability
+- This allows you to be aware of security issues while only blocking deployments on fixable vulnerabilities
 
 If you need to:
-- **Ignore unfixed vulnerabilities**: Set `ignore-unfixed: 'true'`
+- **See all vulnerabilities without blocking on unfixed ones**: Set `ignore-unfixed: 'true'`
+- **Block on all vulnerabilities**: Set `ignore-unfixed: 'false'` (default)
 - **Allow specific severities**: Adjust the `severity` input (e.g., `CRITICAL` only)
 - **Review before fixing**: Check the job summary and artifacts for detailed vulnerability information
 
