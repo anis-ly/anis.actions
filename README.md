@@ -63,11 +63,25 @@ jobs:
 
 #### Behavior
 
-- **CRITICAL/HIGH Vulnerabilities**: Workflow fails (configurable via `severity` input)
-- **MEDIUM Vulnerabilities**: GitHub warning annotations
-- **LOW/UNKNOWN Vulnerabilities**: GitHub notice annotations
-- **Summary**: Detailed vulnerability breakdown in job summary
-- **Artifacts**: JSON and text reports uploaded for analysis
+- **Workflow Failure**: The action will **fail the workflow** when vulnerabilities matching the configured severity levels are found
+  - Default severities: `CRITICAL,HIGH` (configurable via `severity` input)
+  - Uses Trivy's `--exit-code 1` flag to detect vulnerabilities
+  - The workflow will stop and prevent deployment if vulnerabilities are detected
+- **GitHub Annotations**:
+  - **CRITICAL/HIGH**: Error annotations (red) 
+  - **MEDIUM**: Warning annotations (yellow)
+  - **LOW/UNKNOWN**: Notice annotations (blue)
+- **Job Summary**: Detailed vulnerability breakdown with severity counts and full scan results
+- **Artifacts**: JSON and text reports uploaded for detailed offline analysis (retained for 30 days)
+
+#### Important Notes
+
+⚠️ **The workflow WILL fail** if vulnerabilities matching your severity threshold are found. This is by design to prevent insecure deployments.
+
+If you need to:
+- **Ignore unfixed vulnerabilities**: Set `ignore-unfixed: 'true'`
+- **Allow specific severities**: Adjust the `severity` input (e.g., `CRITICAL` only)
+- **Review before fixing**: Check the job summary and artifacts for detailed vulnerability information
 
 #### Example with Multiple Images
 

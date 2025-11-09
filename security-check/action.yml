@@ -85,9 +85,17 @@ runs:
         # Create output directory
         mkdir -p trivy-results
         
+        # Disable exit on error to capture exit codes
+        # The --exit-code 1 flag makes Trivy return exit code 1 when vulnerabilities
+        # matching the severity filter are found. We use set +e to capture this exit
+        # code without terminating the script early, allowing us to generate reports
+        # and summaries before failing the workflow.
+        set +e
+        
         # Run Trivy scan with JSON output for parsing
         echo "📝 Running Trivy scan..."
         trivy image \
+          --exit-code 1 \
           --severity "${{ inputs.severity }}" \
           --format json \
           --output trivy-results/scan-results.json \
@@ -97,13 +105,17 @@ runs:
         
         SCAN_EXIT_CODE=$?
         
-        # Also generate human-readable table output
+        # Also generate human-readable table output (ignore exit code for display)
         trivy image \
+          --exit-code 1 \
           --severity "${{ inputs.severity }}" \
           --format table \
           --timeout "${{ inputs.timeout }}" \
           ${{ inputs.ignore-unfixed == 'true' && '--ignore-unfixed' || '' }} \
           "${{ inputs.image }}" | tee trivy-results/scan-table.txt
+        
+        # Re-enable exit on error
+        set -e
         
         # Parse results
         if [ -f trivy-results/scan-results.json ]; then
